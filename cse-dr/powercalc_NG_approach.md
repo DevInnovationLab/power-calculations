@@ -38,13 +38,13 @@ ESI en Valores RCT (Dominican Republic) · chatbot component
 
 | Assumption | Choice | Type / note |
 |---|---|---|
-| Spillover channel | Untreated students benefit linearly in their school's treated share | **Our modelling choice** — the key one |
-| Spillover magnitude | Swept 0.05–0.30 SD | **Placeholder** — replace with pilot estimate when available |
+| Spillover channel | Untreated students benefit linearly in their school's treated share | Modelling choice different from the note |
+| Spillover magnitude | Swept 0.05–0.30 SD | **Placeholder** — replace with another estimate when available |
 | Saturation levels | 25% / 50% / 75%, equal thirds, stratified by CSE arm | Design option under consideration |
 | Debiasing coding | Centered (`Deb − 0.5`) | Spec choice so β₂ is the pooled effect (see §3) |
-| Estimator | School fixed effects + cluster-robust SEs (`pyfixest`) | Standard library, no hand-rolled econometrics |
-| Female share (girls-only rows) | 50% | From design doc |
-| Simulation replications | 1,000 (fewer for heavy grids) | Numerical precision dial |
+| Estimator | School fixed effects + cluster-robust SEs | Standard library|
+| Female share (girls-only rows) | 50% | From design doc and existing calc |
+| Simulation replications | 1,000 | From existing calc |
 
 
 > **Luiza — do these assumptions look right?**  `[ ] Yes`  ·  `[ ] Discuss`  ·  `[ ] No`  — comments:
