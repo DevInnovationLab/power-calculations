@@ -1,0 +1,563 @@
+---
+title: "Spillover Power & the Saturation-Design"
+subtitle: "AI Chatbot Component ESI en Valores RCT"
+author: "Nandita"
+date: "`r format(Sys.Date())`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# Purpose of this document
+
+1.  Shows, with two independent tools, **how much power we have to detect a spillover** under different saturation schemes:
+    - the **Baird et al. analytic MDE formulas** (their published R code), and
+    - the **`RCT2`** package (Jiang, Imai & Malani 2023)
+
+------------------------------------------------------------------------
+
+# Inputs, notation, and assumptions
+
+```{r tbl-inputs}
+library(knitr); library(kableExtra)
+inputs <- data.frame(
+  Parameter = c("Treatment schools (C)", "Students per school (n)", "Total students",
+                "Significance (alpha)", "Power (gamma)",
+                "ICC — pregnancy", "ICC — overconfidence",
+                "ICC — depression / knowledge", "ICC — test scores",
+                "Pregnancy base rate (1 yr / 4 yr)", "Overconfidence mean / SD",
+                "Female share (girls-only rows)"),
+  Value = c("450", "90", "40,500", "0.05 (two-sided)", "0.80",
+            "0.050", "0.065", "0.100", "0.200",
+            "0.056 / 0.168", "10.4 / 27.7", "0.50"),
+  Source = c("design doc", "design doc (30/grade x 3 grades)", "design doc",
+             "convention", "convention",
+             "ENHOGAR (conservative)", "2024 pilot (N = 800)",
+             "health literature / pilot", "Pruebas Nacionales",
+             "WDI / Dupas 2018", "2024 pilot", "design doc"),
+  check.names = FALSE)
+kable(inputs, caption = "Table 1. Design inputs and data (with sources)") |>
+  kable_styling(bootstrap_options = c("striped","hover","condensed"), full_width = FALSE)
+```
+
+```{r tbl-assumptions}
+assum <- data.frame(
+  Assumption = c("Spillover channel", "Spillover sizes swept", "Saturation designs",
+                 "Debiasing coding", "Estimator (chatbot effect)",
+                 "Estimator (spillover)", "Simulation reps"),
+  Choice = c("untreated outcome rises by  spillover x (school's treated share)",
+             "0, 0.10, 0.20, 0.30 SD  (0 = no spillover)",
+             "uniform 50/50; equal thirds 25/50/75; extreme 20/50/80 @ 40/20/40",
+             "centered (Deb - 0.5) so the chatbot coefficient is the pooled effect",
+             "school fixed effects + cluster-robust SEs",
+             "controls for the school share; no school FE (strata FE + cluster SEs)",
+             "300 per cell (raise for smoother power)"),
+  Type = c("our modelling choice (Baird-style)", "placeholder — replace with pilot",
+           "design options compared", "specification choice",
+           "standard", "standard", "numerical"),
+  check.names = FALSE)
+kable(assum, caption = "Table 2. Modelling assumptions (our choices)") |>
+  kable_styling(bootstrap_options = c("striped","hover","condensed"), full_width = FALSE)
+```
+
+```{r tbl-notation}
+notation <- data.frame(
+  Symbol = c("n", "C", "tau", "sigma", "varN", "varCo", "pi", "f",
+             "mu_ind", "p_ind", "j, k", "t_alpha", "t_gamma", "Var_S", "MDSE_S"),
+  Meaning = c("students per school", "number of schools",
+              "between-school variance", "within-school variance",
+              "total individual variance", "clustering penalty",
+              "saturation levels (treated share per bin)",
+              "share of schools at each saturation",
+              "expected treated share in a bin", "expected untreated share in a bin",
+              "the two saturation bins compared for the slope",
+              "test critical value", "power critical value",
+              "sampling variance of the spillover-slope estimate",
+              "minimum detectable spillover slope"),
+  `Formula / value` = c("90", "450", "= ICC", "= 1 - ICC", "tau + sigma  (= 1)",
+              "(n - 1) * tau", "e.g. c(.25,.50,.75)", "e.g. c(1/3,1/3,1/3)",
+              "pi * f", "(1 - pi) * f", "the extreme bins (1 and 3)",
+              "qt(1 - alpha/2, nC - 3)", "qt(gamma, nC - 3)",
+              "[varCo*(1/f_j+1/f_k) + varN*(1/p_j+1/p_k)] / (nC)",
+              "(t_alpha + t_gamma) * sqrt(Var_S) / (pi_k - pi_j)"),
+  Source = c("design", "design", "definition (= ICC)", "definition",
+             "Baird et al.", "Baird et al.", "design choice", "design choice",
+             "Baird et al.", "Baird et al.", "our choice",
+             "Baird et al.", "Baird et al.", "Baird et al.", "Baird et al."),
+  check.names = FALSE)
+kable(notation, caption = "Table 3. Notation used in the formulae") |>
+  kable_styling(bootstrap_options = c("striped","hover","condensed"), full_width = FALSE) 
+```
+
+------------------------------------------------------------------------
+
+# Background: the design and why spillovers matter
+
+The chatbot is randomized in two stages:
+
+- **Stage 1 (school level):** schools are assigned to *Regular CSE* vs *CSE + Debiasing*. These are **between-school** comparisons.
+- **Stage 2 (individual level):** within each treatment school, students are randomized to chatbot access. This is a **within-school** comparison.
+- 
+
+| Estimand | Randomized at | School FE? |
+|------------------------|------------------------|------------------------|
+| CSE vs control; debiasing vs CSE | school level | **No** — absorbed by FE; analyzed between-school |
+| Chatbot direct effect | individual, within school | **Yes** — FE removes between-school noise (precision gain) |
+| Spillover (school's treated share) | school level (one value per school) | **No** — absorbed by FE; identified between schools |
+
+------------------------------------------------------------------------
+
+# Baird et al. 2018
+
+The key result: **the power to detect the average (pooled) treatment effect declines exactly as you gain the ability to identify spillover and slope effects.** You cannot maximize both.
+
+Rules they derive:
+
+- If you want **both** the treatment and spillover effects, put **more clusters at the extreme saturations** (e.g. more schools at 20% and 80% than at 40/60%). The needed skew shrinks as the ICC rises.
+- If you only want the **slope** (how spillovers change with exposure), you don't need a pure-control group; use extreme symmetric saturations (\~0.1 and 0.9).
+- For the **pooled treatment effect**, a simple partial-population design (pure control + one interior saturation) is optimal; spreading saturations *reduces* its power.
+- **Bottom line:** if spillovers are likely small and ICC is high, don't saturate.
+
+------------------------------------------------------------------------
+
+# Tool 1 - Baird et al. analytic MDEs (base R)
+
+These are the authors' published functions (base R, no packages)
+
+direct file: <https://pdel.ucsd.edu/_files/R%20Implementation.R>
+
+full software page: <https://pdel.ucsd.edu/about/tools/index.html>
+
+`power_slope()` gives the **minimum detectable spillover slope**; how precisely we can estimate the way spillovers change across saturations.
+
+```{r baird-functions}
+# Source: Baird, Bohren, McIntosh & Ozler -- PDEL "R Implementation.R"
+#   https://pdel.ucsd.edu/_files/R%20Implementation.R
+# Base R only (uses qt()); no packages required. Arguments explained in the table below.
+
+power_slope <- function(n, C, alpha, gamma, tau, sigma, pi, f, j, k) {
+  t_alpha <- qt(1 - alpha/2, n*C - 3)
+  t_gamma <- qt(gamma, n*C - 3)
+  mu_ind <- pi * f                 # E[treated]   per saturation bin
+  p_ind  <- (1 - pi) * f           # E[untreated] per saturation bin
+  varN  <- tau + sigma             # total individual variance
+  varCo <- (n - 1) * tau           # cluster-correlation contribution
+  Var_T <- (varCo*(1/f[j] + 1/f[k]) + varN*(1/mu_ind[j] + 1/mu_ind[k])) / (n*C)
+  Var_S <- (varCo*(1/f[j] + 1/f[k]) + varN*(1/p_ind[j]  + 1/p_ind[k]))  / (n*C)
+  list(MDSE_T = ((t_alpha + t_gamma)/(pi[k] - pi[j])) * sqrt(Var_T),   # treatment slope
+       MDSE_S = ((t_alpha + t_gamma)/(pi[k] - pi[j])) * sqrt(Var_S))   # spillover slope
+}
+
+# power_pooled(): pooled treatment effect vs a PURE CONTROL (MDE_Tonly) and the
+# pooled SPILLOVER LEVEL on untreated students vs a pure control (MDE_S).
+# Requires a saturation-0 ("pure control") arm
+power_pooled <- function(n, C, alpha, gamma, tau, sigma, pi, f) {
+  t_alpha <- qt(1 - alpha/2, n*C - 3); t_gamma <- qt(gamma, n*C - 3)
+  mu  <- sum(pi * f); eta <- sum(pi^2 * f)
+  psi <- if (pi[1] == 0) f[1] else 0          # share of schools that are pure control
+  muS <- 1 - mu - psi
+  etaT <- (eta - mu^2)/(1 - psi) - (psi/(1 - psi)^2)*mu^2
+  varN <- tau + sigma; varCo <- (n - 1)*tau
+  Var  <- 1/(n*C)*(varCo*(1/(psi*(1-psi)) + (1-psi)/(mu ^2)*etaT) + varN*(psi+mu )/(mu *psi))
+  VarS <- 1/(n*C)*(varCo*(1/(psi*(1-psi)) + (1-psi)/(muS^2)*etaT) + varN*(psi+muS)/(muS*psi))
+  Var_T <- 1/(n*C)*(varCo*(eta-mu^2)/(mu^2*(1-mu)^2) + varN/(mu*(1-mu)))
+  list(MDE_T = (t_alpha+t_gamma)*sqrt(Var),       # pooled treatment (needs pure control)
+       MDE_S = (t_alpha+t_gamma)*sqrt(VarS),      # pooled spillover LEVEL vs control
+       MDE_Tonly = (t_alpha+t_gamma)*sqrt(Var_T)) # treatment vs control
+}
+
+# Spillover-slope MDE only (safe when a bin is a pure control: avoids the
+# treated-slope term, which divides by zero when a bin has no treated students).
+spill_slope_S <- function(n, C, alpha, gamma, tau, sigma, pi, f, j, k) {
+  tt <- qt(1 - alpha/2, n*C - 3) + qt(gamma, n*C - 3)
+  p_ind <- (1 - pi) * f
+  varN <- tau + sigma; varCo <- (n - 1)*tau
+  Var_S <- (varCo*(1/f[j] + 1/f[k]) + varN*(1/p_ind[j] + 1/p_ind[k])) / (n*C)
+  (tt / (pi[k] - pi[j])) * sqrt(Var_S)
+}
+```
+
+The spillover effect can differ across saturation levels; its *slope* is (spillover at high saturation − spillover at low saturation) ÷ (high − low share). `power_slope()` returns the smallest such slope we could distinguish from zero: a standard-error term `sqrt(Var_S)`, scaled up by the test-and-power constants `(t_alpha + t_gamma)`, and **divided by the saturation gap** `(pi[k] − pi[j])`.
+
+## Design comparison: equal-thirds vs extreme-weighted
+
+```{r design-comparison}
+library(knitr)
+library(kableExtra)   # install.packages("kableExtra") if needed
+
+n <- 90; C <- 450
+outcomes <- list(c("Pregnancy rate",         0.050),
+                 c("Overconfidence score",   0.065),
+                 c("Depression / Knowledge", 0.100),
+                 c("Test scores",            0.200))
+
+cmp <- do.call(rbind, lapply(outcomes, function(o) {
+  icc <- as.numeric(o[2]); tau <- icc; sig <- 1 - icc
+  eq <- power_slope(n, C, .05, .80, tau, sig, c(.25,.50,.75), c(1/3,1/3,1/3), 1, 3)$MDSE_S
+  ex <- power_slope(n, C, .05, .80, tau, sig, c(.20,.50,.80), c(.40,.20,.40), 1, 3)$MDSE_S
+  data.frame(Outcome = o[1],
+             ICC = sprintf("%.3f", icc),
+             Eq  = sprintf("%.4f", eq),
+             Ex  = sprintf("%.4f", ex),
+             Gain = sprintf("-%.1f%%", (1 - ex/eq) * 100),
+             check.names = FALSE)
+}))
+colnames(cmp) <- c("Outcome", "ICC", "Equal thirds 25/50/75",
+                   "Extreme 20/50/80 (40/20/40)", "MDE reduction")
+
+kable(cmp, align = c("l", "c", "c", "c", "c"),
+      caption = paste0("Minimum detectable spillover SLOPE (SD units) by saturation design ",
+                       "(80% power, alpha = 0.05, 450 schools x 90 students)")) |>
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE) |>
+  add_header_above(c(" " = 2, "MDE of spillover slope (SD)" = 2, " " = 1)) |>
+  column_spec(4, bold = TRUE) 
+```
+
+The extreme-weighted design (20/50/80, with 40% of schools at each extreme and only 20% at 50%) lowers the detectable spillover by roughly a fifth to a quarter across outcomes. Even so, the detectable spillover is large in absolute terms (about 0.14-0.31 SD) and worst for high-ICC outcomes like test scores, so only sizeable spillovers will be detectable.
+
+## Pure control group addition
+
+In the current design no treatment school is at saturation 0 but we can add one (CSE schools where 0% get the chatbot). Doing so is what unlocks Baird's pure-control formulas and gives two *spillover-clean* comparisons.
+
+| \# | Estimand | What it answers | Tool | Needs pure control? |
+|---------------|---------------|---------------|---------------|---------------|
+| 1 | **Direct effect (within-FE)** | chatbot vs a *classmate* without it | within-school FE formula | no |
+| 2 | **Treatment vs control** | chatbot vs a *pure-control school* (spillover-clean) | `power_pooled()` `MDE_Tonly` | **yes** |
+| 3 | **Spillover slope** | how spillover *changes* with saturation | `power_slope()` `MDSE_S` | no (needs ≥2 saturations) |
+| 4 | **Spillover level vs control** | untreated-in-treated-school vs pure control | `power_pooled()` `MDE_S` | **yes** |
+
+Estimand 1 is precise but spillover-biased; estimand 2 is the clean version (needs a pure control). Estimand 3 measures the *shape* of spillover across saturations; estimand 4 measures its *level* against a clean baseline.
+
+For estimand 1 the formula is the within-school one, `(t_alpha + t_gamma) * sigma_within * sqrt(1 / (N * mean[s(1-s)]))`; the design enters only through `mean[s(1-s)]`, largest at a 50/50 split.
+
+## Variation across designs
+
+```{r master-menu}
+icc  <- 0.20                               # test scores (highest ICC = hardest); edit to compare outcomes
+zc   <- qnorm(0.975) + qnorm(0.80)         # 2.80 test+power constant
+Ntot <- 90 * 450
+
+# Estimand 1: within-school direct effect (chatbot vs classmate). 0 if no within-school variation.
+direct_mde <- function(pi, f) {
+  mean_s <- sum(f * pi * (1 - pi))         # avg treatment-assignment variance
+  if (mean_s == 0) return(NA)
+  zc * sqrt(1 - icc) * sqrt(1 / (Ntot * mean_s))
+}
+
+# design menu: name, saturations (pi), school shares (f), spillover-slope bins (j,k), pure control?
+menu <- list(
+  list("Uniform 50/50",               c(.50),               c(1),            NA,     FALSE),
+  list("Partial pop: control + 50%",  c(0,.50),             c(.50,.50),      c(1,2), TRUE),
+  list("Equal thirds 25/50/75",       c(.25,.50,.75),       c(1/3,1/3,1/3),  c(1,3), FALSE),
+  list("Extreme 20/50/80 (40/20/40)", c(.20,.50,.80),       c(.40,.20,.40),  c(1,3), FALSE),
+  list("Symmetric 20/80 (50/50)",     c(.20,.80),           c(.50,.50),      c(1,2), FALSE),
+  list("Wide 10/50/90 (40/20/40)",    c(.10,.50,.90),       c(.40,.20,.40),  c(1,3), FALSE),
+  list("Baird ladder 0/25/50/75/100", c(0,.25,.50,.75,1),   rep(.2,5),       c(2,4), TRUE),
+  list("Control + thirds 0/25/50/75", c(0,.25,.50,.75),     rep(.25,4),      c(2,4), TRUE),
+  list("Control + 20/50/80 (0/20/50/80)", c(0,.20,.50,.80), rep(.25,4),      c(2,4), TRUE))
+
+fmt <- function(x) ifelse(is.na(x) | !is.finite(x), "—", sprintf("%.3f", x))
+menu_tbl <- do.call(rbind, lapply(menu, function(d) {
+  pi <- d[[2]]; f <- d[[3]]; jk <- d[[4]]; pc <- d[[5]]
+  slope  <- if (length(pi) > 1) spill_slope_S(90, 450, .05, .80, icc, 1 - icc, pi, f, jk[1], jk[2]) else NA
+  pooled <- if (pc) power_pooled(90, 450, .05, .80, icc, 1 - icc, pi, f) else list(MDE_Tonly = NA, MDE_S = NA)
+  data.frame(Design = d[[1]], `Pure control?` = ifelse(pc, "Yes", "No"),
+             `1. Direct (within-FE)`     = fmt(direct_mde(pi, f)),
+             `2. Treatment vs control`   = ifelse(pc, fmt(pooled$MDE_Tonly), "—"),
+             `3. Spillover slope`        = fmt(slope),
+             `4. Spillover vs control`   = ifelse(pc, fmt(pooled$MDE_S), "—"),
+             check.names = FALSE)
+}))
+kable(menu_tbl, align = c("l","c","c","c","c","c"),
+      caption = "Test scores (ICC 0.20): MDE (SD) for each estimand, by design. Lower = more power; — = not identified.") |>
+  kable_styling(bootstrap_options = c("striped","hover","condensed"), full_width = FALSE) |>
+  add_header_above(c(" " = 2, "Treatment effect" = 2, "Spillover" = 2)) |>
+  footnote(general = paste0(
+    "Estimand 1 (within-FE direct): chatbot vs a classmate without it — precise but spillover-biased. ",
+    "Estimand 2 (Baird power_pooled MDE_Tonly): chatbot vs a PURE-CONTROL school — spillover-clean. ",
+    "Estimand 3 (Baird power_slope MDSE_S): how spillover changes across saturations. ",
+    "Estimand 4 (Baird power_pooled MDE_S): untreated-in-treated-school vs pure control — the spillover LEVEL. ",
+    "Estimands 2 and 4 require a saturation-0 (pure-control) arm; hence '—' for designs without one."),
+    general_title = "Notes: ")
+```
+
+1.  **Direct effect (col 1)** is best under **uniform 50/50** (\~0.025) and gets worse as we add pure-control or extreme schools (they have little/no within-school chatbot variation). But this estimate is *spillover-biased*.
+2.  **Treatment vs control (col 2)** is the *spillover-clean* direct effect — available only with a pure control (\~0.085). It's less precise than col 1 (it's a between-school comparison) but immune to contamination. Note it's still a small, detectable effect.
+3.  **Spillover slope (col 3)** is best when the two extreme bins are wide *and* hold many schools: wide 10/50/90 is best (\~0.19), then symmetric (\~0.21) and extreme (\~0.24); equal thirds is weaker (\~0.31); and the ladder (\~0.40) and control+thirds (\~0.36) are the worst — spreading schools across many bins leaves only a few in each compared bin, which hurts the slope.
+4.  **Spillover level vs control (col 4)** is the best-powered way to detect a spillover at all (\~0.12 with the partial-population design) *because* it leans on the clean pure-control baseline.
+
+Columns 1 and 3 pull in opposite directions (Baird's central result): spreading toward the extremes helps the spillover but costs direct-effect precision. But if the direct effect has some slack (it stays \~0.025–0.085 SD everywhere) then the **spillover is the binding constraint**. Onme straightforward way in which case would be to **add a pure-control arm** (estimand 4, \~0.12 SD), which *also* buys a clean treatment effect (estimand 2).
+
+The same rankings hold for the lower-ICC outcomes (pregnancy, overconfidence); the absolute MDEs just shrink.
+
+------------------------------------------------------------------------
+
+# Tool 2 - `RCT2` cross-check (R package)
+
+Its `Calsamplesize()` returns the **number of clusters** needed to detect a given effect at a target power, per assignment mechanism. The effect-size argument `mu` is *"the largest **direct** effect across treatment assignment mechanisms.*
+
+We run `Calsamplesize` for the saturation designs and compare the clusters it needs against our **450 schools**
+
+```{r rct2-inputs}
+rct2_inputs <- data.frame(
+  Input = c("Clusters (schools)", "Students per school", "ICC",
+            "Direct effect to detect (mu)", "Significance / power",
+            "Designs compared", "Excluded", "Method"),
+  Value = c("450", "90", "0.10", "0.05 SD", "0.05 / 0.80",
+            "the 3-mechanism designs: equal thirds 25/50/75; extreme 20/50/80; wide 10/50/90",
+            "uniform 50/50 (1 mechanism) and symmetric 20/80 (2 mechanisms) - Calsamplesize needs 3 arms; also 0%/100% arms (direct effect undefined there)",
+            "RCT2 design-based (Jiang-Imai-Malani 2023); data simulated to the assumed ICC"),
+  check.names = FALSE)
+knitr::kable(rct2_inputs, caption = "RCT2 cross-check: inputs and assumptions") |>
+  kableExtra::kable_styling(bootstrap_options = c("striped","hover","condensed"), full_width = FALSE)
+```
+
+```{r rct2-designs, eval=FALSE}
+library(RCT2); library(kableExtra)
+set.seed(2026)
+n_per <- 90; n_clust <- 450; icc <- 0.10
+mu <- 0.05                          # DIRECT effect to detect (SD); RCT2's 'mu'
+
+# NOTE: RCT2's Calsamplesize is built around a THREE-mechanism design (its worked
+# example uses three arms) and its internal indexing errors for 1- or 2-mechanism
+# designs. So we compare only the 3-mechanism designs here (uniform = 1 arm and
+# symmetric 20/80 = 2 arms are excluded), and it sizes the DIRECT effect, so 0%/100%
+# arms don't apply either. For each design the three ASSIGNMENT MECHANISMS are the
+# three treated shares a school can be assigned to.
+designs_rct2 <- list(
+  "Equal thirds 25/50/75" = list(lv = c(.25,.50,.75), w = c(1/3,1/3,1/3)),  # mechanisms: 25% / 50% / 75% treated
+  "Extreme 20/50/80"      = list(lv = c(.20,.50,.80), w = c(.40,.20,.40)),  # mechanisms: 20% / 50% / 80% treated
+  "Wide 10/50/90"         = list(lv = c(.10,.50,.90), w = c(.40,.20,.40)))  # mechanisms: 10% / 50% / 90% treated
+
+build_dat <- function(lv, w) {
+  sat <- sample(lv, n_clust, replace = TRUE, prob = w)   # random mechanism per school (matches the run that worked)
+  A   <- rep(sat, each = n_per)                          # A = the school's assignment mechanism (treated share)
+  Z   <- rbinom(n_clust * n_per, 1, A)                   # treat each student at the school's rate
+  u   <- rep(rnorm(n_clust, 0, sqrt(icc)), each = n_per)
+  e   <- rnorm(n_clust * n_per, 0, sqrt(1 - icc))
+  Y   <- 0.10 * Z + 0.10 * A * (1 - Z) + u + e
+  data.frame(Z = Z, A = A, Y = Y, id = rep(1:n_clust, each = n_per))   # integer id (matches the run that worked)
+}
+
+rows <- lapply(names(designs_rct2), function(nm) {
+  d   <- designs_rct2[[nm]]
+  dat <- build_dat(d$lv, d$w)
+  qa  <- d$w / sum(d$w)                                # share of schools per mechanism
+  ss  <- Calsamplesize(dat, mu, qa, alpha = 0.05, beta = 0.20)   # class "sample": numeric vector
+  cl  <- as.numeric(ss)                                # clusters needed, one per mechanism
+  data.frame(Design = nm,
+             Mechanisms = paste0(d$lv * 100, "%", collapse = " / "),
+             `Clusters needed (per mechanism)` = paste(round(cl), collapse = " / "),
+             `Min clusters (best mechanism)`   = round(min(cl)),
+             check.names = FALSE)
+})
+kable(do.call(rbind, rows), align = c("l","c","c","c"),
+      caption = "RCT2 (design-based): clusters needed to detect a 0.05 SD DIRECT effect, by saturation design (ICC 0.10)") |>
+  kable_styling(bootstrap_options = c("striped","hover","condensed"), full_width = FALSE) |>
+  footnote(general = paste0(
+    "Calsamplesize sizes the DIRECT effect (mu = largest direct effect across mechanisms). ",
+    "Compare 'Min clusters' against our 450 schools; the 50% mechanism is the most efficient. ",
+    "Numbers are randomization-based and corroborate Baird directionally, not exactly."),
+    general_title = "Notes: ")
+```
+
+------------------------------------------------------------------------
+
+# Design × spillover grid (simulation)
+
+For each assignment design, and a range of assumed spillover sizes (**including none**), this simulation reports (a) the **bias** of the naive within-school direct-effect estimate, (b) whether the true direct effect can be **recovered**, and (c) the **power to detect the spillover**.
+
+## Assumptions
+
+- **Design held fixed:** 450 treatment schools, 90 surveyed students each.
+- **Outcome standardized** so total variance = 1; the **ICC** sets the between-school share of variance (we use 0.10 here).
+- **True direct chatbot effect planted at 0.10 SD**
+- **Spillover model:** untreated students gain `spillover * (school's treated share)` —{0, 0.10, 0.20, 0.30} SD; **0 = no spillover** (a validity check).
+- **Nine designs:** uniform 50/50; partial population (0/50); equal thirds (25/50/75); extreme (20/50/80); symmetric (20/80); wide (10/50/90); control+full (0/50/100); control+thirds (0/25/50/75); and the Baird ladder (0/25/50/75/100).
+- **What we measure per design × spillover:** (i) the **bias** of the naive within-school estimate (the attenuation a design would suffer), and (ii) the **power to detect the spillover** by testing whether *untreated* students' outcomes rise with their school's saturation.
+
+```{r grid-setup}
+library(fixest)      # fixed-effects regressions + cluster-robust SEs
+library(kableExtra)  # formatted table output
+set.seed(2026)
+
+S        <- 450                      # treatment schools
+n_per    <- 90                       # students surveyed per school
+icc      <- 0.10                     # between-school share of variance (ICC)
+b2_true  <- 0.10                     # TRUE direct chatbot effect we plant (SD units)
+spills   <- c(0, 0.10, 0.20, 0.30)   # spillover sizes to test (0 = none)
+REPS     <- 150                      # reps per cell 
+
+# every candidate design as (saturation levels, share of schools at each level)
+DESIGN_SPECS <- list(
+  "Uniform 50/50"                = list(lv = c(.50),             w = c(1)),
+  "Partial pop 0/50"             = list(lv = c(0,.50),           w = c(.50,.50)),
+  "Equal thirds 25/50/75"        = list(lv = c(.25,.50,.75),     w = c(1/3,1/3,1/3)),
+  "Extreme 20/50/80"             = list(lv = c(.20,.50,.80),     w = c(.40,.20,.40)),
+  "Symmetric 20/80"              = list(lv = c(.20,.80),         w = c(.50,.50)),
+  "Wide 10/50/90"                = list(lv = c(.10,.50,.90),     w = c(.40,.20,.40)),
+  "Control+full 0/50/100"        = list(lv = c(0,.50,1),         w = c(1/3,1/3,1/3)),
+  "Control+thirds 0/25/50/75"    = list(lv = c(0,.25,.50,.75),   w = c(.25,.25,.25,.25)),
+  "Baird ladder 0/25/50/75/100"  = list(lv = c(0,.25,.50,.75,1), w = rep(.2, 5)),
+  "Control + 20/50/80 0/20/50/80" = list(lv = c(0,.20,.50,.80),   w = c(.25,.25,.25,.25)))
+designs <- names(DESIGN_SPECS)
+```
+
+## Step 1 — assign each school a saturation
+
+`assign_sat()` gives every school its treated share under the chosen design, stratified by CSE arm so the two arms stay balanced.
+
+```{r grid-step1}
+assign_sat <- function(design, deb) {
+  sp <- DESIGN_SPECS[[design]]; lv <- sp$lv; w <- sp$w
+  if (length(lv) == 1) return(rep(lv, S))                   # uniform: every school same share
+  sat <- numeric(S)
+  for (arm in c(0, 1)) {                                    # stratify within each CSE arm
+    idx <- which(deb == arm); m <- length(idx)
+    cnt <- floor(w * m); cnt[length(cnt)] <- m - sum(cnt[-length(cnt)])
+    lvl <- unlist(mapply(function(c, l) rep(l, c), cnt, lv))
+    sat[idx] <- sample(lvl)                                 # shuffle which school gets which
+  }
+  sat
+}
+```
+
+## Step 2 — generate virtual study and estimate it two ways
+
+The outcome is built as:
+
+```         
+Y = school_effect(ICC) + 0.10*Chatbot + spillover*share*(1 - Chatbot) + noise
+```
+
+i.e. a school baseline + the planted direct effect for treated students + a spillover bonus for *untreated* students that grows with their school's treated share + individual noise. We then run both regressions on that one dataset.
+
+```{r grid-step2}
+sim_once <- function(design, spill) {
+  deb <- sample(rep(c(0, 1), each = S / 2))                 # half schools debiasing
+  sat <- assign_sat(design, deb)                            # Step 1
+  k   <- round(sat * n_per)                                 # treated count per school
+  Tt  <- unlist(lapply(k, function(kk) sample(rep(c(1, 0), c(kk, n_per - kk)))))
+  d <- data.frame(school = rep(seq_len(S), each = n_per),
+                  s_s = rep(sat, each = n_per), T = Tt)      # s_s = school treated share
+  u <- rep(rnorm(S, 0, sqrt(icc)), each = n_per)            # between-school (ICC)
+  e <- rnorm(S * n_per, 0, sqrt(1 - icc))                   # within-school
+  d$y <- u + b2_true * d$T + spill * d$s_s * (1 - d$T) + e  # plant the outcome
+
+  # (i) NAIVE within-school direct effect (mixed schools only): biased if spillover present
+  mid   <- d[d$s_s > 0 & d$s_s < 1, ]
+  b2_fe <- coef(feols(y ~ T | school, data = mid, cluster = ~school))[["T"]]
+
+  # (ii) SPILLOVER detection (robust for every design): do UNTREATED students'
+  #      outcomes rise with their school's saturation? (cluster-robust by school)
+  un <- d[d$T == 0, ]
+  reject <- NA_real_
+  if (length(unique(un$s_s)) > 1) {
+    m <- feols(y ~ s_s, data = un, cluster = ~school)
+    reject <- as.numeric(abs(m$coeftable["s_s", "t value"]) > 1.96)
+  }
+  c(b2_fe = b2_fe, reject = reject)
+}
+```
+
+## Step 3 — repeat over the whole grid and summarise
+
+```{r grid-step3}
+res <- data.frame()
+for (dz in designs) for (sp in spills) {
+  draws <- replicate(REPS, sim_once(dz, sp))                # 2 x REPS matrix
+  res <- rbind(res, data.frame(
+    design = dz,
+    spill  = sp,
+    est    = mean(draws["b2_fe", ]),                        # naive direct estimate (true = 0.10)
+    power  = mean(draws["reject", ], na.rm = TRUE)))        # power to detect spillover
+}
+res
+```
+
+## Step 4 — format the results table
+
+```{r grid-step4}
+disp <- data.frame(
+  `Spillover (delta)`            = sprintf("%.2f", res$spill),
+  `Naive direct estimate`        = sprintf("%+.3f", res$est),
+  `Spillover detection power`    = ifelse(is.finite(res$power), sprintf("%.0f%%", 100 * res$power), "—"),
+  check.names = FALSE)
+
+kt <- kable(disp, align = c("c", "c", "c"),
+      caption = sprintf(paste0("Design x spillover grid (live simulation): ",
+                               "true direct effect = %.2f SD, ICC = %.2f, %d reps/cell"),
+                        b2_true, icc, REPS)) |>
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+ns <- length(spills)
+for (i in seq_along(designs)) kt <- pack_rows(kt, designs[i], (i - 1)*ns + 1, i*ns)
+kt |> footnote(general = paste0(
+    "Naive direct estimate = within-school FE estimate on mixed schools; the TRUE value is 0.10 but it ",
+    "is biased by about -0.5*spillover under EVERY design (it collapses to ~0 at spillover 0.20 and flips ",
+    "negative at 0.30).",
+    "Spillover detection power = share of reps where untreated students' outcomes significantly rise with ",
+    "their school's saturation (cluster-robust, alpha = 0.05). Uniform 50/50 has no variation among the ",
+    "untreated, so it cannot detect spillover ('—'). The delta = 0 rows are validity checks (~5%). "),
+    general_title = "Notes: ")
+```
+
+- **Spillover detection power rises with the spillover size**. At a 0.20 spillover, the **spread designs do best** (symmetric 20/80 and wide 10/50/90 ≈ 90%+, control+thirds and partial-pop ≈ 85–90%, extreme ≈ 85%), while **equal thirds (\~68%)** and **control+full 0/50/100 (\~70%)** trail; the latter because its 100%-saturation third has no untreated students to measure spillover on.
+
+------------------------------------------------------------------------
+
+# TBD:
+
+- **Do we want to estimate spillover effects (is that a study objective)?**
+  - **If yes:** a saturation design is justified and it should probably include a **pure-control (0%) arm plus several interior levels**.
+
+  - **If no:** don't saturate.
+
+------------------------------------------------------------------------
+
+# Scorecard: both tools at a glance
+
+```{r scorecard}
+ref_spill <- 0.20
+zc <- qnorm(.975) + qnorm(.80)
+score <- do.call(rbind, lapply(designs, function(dz) {
+  sp <- DESIGN_SPECS[[dz]]
+  meanS <- sum(sp$w * sp$lv * (1 - sp$lv))                 # avg treatment-assignment variance
+  me <- if (meanS > 0) zc * sqrt(1 - icc) * sqrt(1/(S*n_per*meanS)) else NA
+  pw <- res$power[res$design == dz & res$spill == ref_spill]
+  data.frame(Design = dz,
+    `Pure control?`            = ifelse(0 %in% sp$lv, "Yes", "No"),
+    `Main-effect MDE`          = ifelse(is.na(me), "—", sprintf("%.3f SD", me)),
+    `Spillover power (d=0.20)` = ifelse(length(pw) && is.finite(pw), sprintf("%.0f%%", 100*pw), "—"),
+    check.names = FALSE)
+}))
+kable(score, align = c("l","c","c","c"),
+      caption = sprintf("Design scorecard (ICC %.2f): main-effect precision (Tool 1) vs spillover detection (grid sim)", icc)) |>
+  kable_styling(bootstrap_options = c("striped","hover","condensed"), full_width = FALSE) |>
+  add_header_above(c(" " = 2, "Tool 1 (analytic)" = 1, "Grid (simulation)" = 1)) |>
+  footnote(general = paste0(
+    "Main-effect MDE: within-school FE formula (Tool 1) - smaller = more precise direct effect. ",
+    "Spillover power: grid simulation at a true 0.20 SD spillover - higher = easier to detect. ",
+    "The columns trade off: spread/extreme designs detect spillover best at a slightly larger main-effect ",
+    "MDE; uniform 50/50 has the smallest main-effect MDE but cannot detect spillover. A pure-control arm ",
+    "additionally gives a spillover-CLEAN direct effect (Tool 1 master menu)."),
+    general_title = "Notes: ")
+```
+
+**Uniform 50/50** has the smallest main-effect MDE (most precise direct effect) but **cannot detect spillover at all**. The **spread designs** (symmetric 20/80 and wide 10/50/90 \~94%, extreme \~86%) and the better **pure-control designs** (partial-pop \~87%, control+thirds \~89%) detect spillover best, for only a small increase in the main-effect MDE.
+
+------------------------------------------------------------------------
+
+# References
+
+- Baird, S., Bohren, J. A., McIntosh, C., & Özler, B. (2018). *Optimal Design of Experiments in the Presence of Interference.* Review of Economics and Statistics, 100(5), 844–860.
+- Bohren, Staples, Baird, McIntosh, Özler (2016). *Power Calculation Software for Randomized Saturation Experiments* (PDEL, UCSD) — GUI + Python/R/MATLAB code: <https://pdel.ucsd.edu/about/tools/index.html>
+- Jiang, Z., Imai, K., & Malani, A. (2023). *Statistical Inference and Power Analysis for Direct and Spillover Effects in Two-Stage Randomized Experiments.* Biometrics, 79(3), 2370–2383. `RCT2` package: <https://cran.r-project.org/package=RCT2>
+- World Bank Development Impact blog (practical summary): <https://blogs.worldbank.org/en/impactevaluations/power-calculation-software-randomized-saturation-experiments> \`\`\`
