@@ -1,0 +1,521 @@
+---
+title: "Power Calculations: AI Chatbot Component — ESI en Valores RCT"
+author: "Tomás Buitrago | Development Innovation Lab"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: false
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+    code_folding: show
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo       = TRUE,
+  warning    = FALSE,
+  message    = FALSE,
+  fig.width  = 9,
+  fig.height = 5.5,
+  fig.align  = "center"
+)
+```
+
+```{r libraries}
+# ── Core packages ─────────────────────────────────────────────────────────────
+library(tidyverse)   # data wrangling and ggplot2
+library(pwr)         # analytical power functions (pwr.t.test, pwr.2p.test)
+library(knitr)       # kable for formatted tables
+library(kableExtra)  # extended table styling
+library(sandwich)    # cluster-robust variance estimation (vcovCL)
+library(lmtest)      # coeftest() with heteroskedasticity/cluster-robust SEs
+
+theme_set(
+  theme_minimal(base_size = 12) +
+    theme(
+      plot.title       = element_text(face = "bold"),
+      plot.subtitle    = element_text(color = "grey40"),
+      panel.grid.minor = element_blank()
+    )
+)
+```
+
+
+# Study Design
+
+**Two-stage randomisation:**
+
+**Stage 2 — Individual student-level (chatbot):** All students in the 450 treatment schools are individually randomized 50/50 to chatbot access vs. no chatbot, stratified by school CSE arm. 90 surveyed students per school (30 per grade × 3 grades), yields 40,500 students in the chatbot randomization.
+
+
+# Key Parameters
+
+```{r parameters}
+# Study design 
+n_schools_treatment   <- 450    # total treatment schools
+n_schools_per_arm     <- 225    # per school-level arm (Regular CSE / CSE+Debiasing)
+n_students_per_school <- 90     # surveyed per school (30/grade × 3 grades)
+
+# Chatbot randomization (individual-level 50/50 within each treatment school)
+n_chatbot_total   <- n_schools_treatment * n_students_per_school  # 40,500
+n_per_chatbot_arm <- n_chatbot_total / 2                           # 20,250
+n_per_cell_2x2    <- n_chatbot_total / 4                           # 10,125
+
+# Girls-only subsamples (assume 50% female)
+n_girls_per_arm  <- n_per_chatbot_arm / 2   # 10,125
+n_girls_per_cell <- n_per_cell_2x2 / 2      # 5,062
+
+# Statistical conventions 
+alpha        <- 0.05
+power_target <- 0.80
+z_alpha      <- qnorm(1 - alpha / 2)   # 1.960
+z_beta       <- qnorm(power_target)    # 0.842
+
+# Intra-cluster correlation coefficients (ICC)
+# ICC = share of total variance that lies between schools.
+
+icc_pregnancy      <- 0.050   # ENHOGAR national survey 
+icc_overconfidence <- 0.065   # 2024 pilot study (N = 800 students)
+icc_test_scores    <- 0.200   # Pruebas Nacionales administrative data
+icc_depression     <- 0.100   # school-level health literature; pilot study
+icc_knowledge      <- 0.100   # within-school component for knowledge/behaviour index
+
+# Outcome-specific baseline parameters 
+# Binary outcomes: pregnancy rate
+p0_preg_1yr <- 0.056   # annual hazard rate, girls 15–19 (WB WDI; Dupas 2018 SD)
+p0_preg_4yr <- 0.168   # four-year cumulative rate
+
+# Continuous outcomes: overconfidence score (0–100 scale)
+mean_overconf <- 10.4   # mean from 2024 pilot
+sd_overconf   <- 27.7   # SD from 2024 pilot
+
+# Standardized or Bernoulli outcomes (normalized SD = 1 or 0.5)
+sd_test_scores <- 1.0   # Pruebas Nacionales, normalized
+sd_depression  <- 1.0   # standardized index
+sd_knowledge   <- 0.5   # Bernoulli SD at p0 = 0.50
+p0_knowledge   <- 0.50  # baseline knowledge/behaviour rate
+
+# Print summary 
+tibble(
+  Parameter = c(
+    "Treatment schools", "Per school-level arm (CSE / CSE+Debiasing)",
+    "Surveyed students per school",
+    "Total students in chatbot randomisation",
+    "Per chatbot arm — Beta_2 (full sample)",
+    "Per chatbot arm — girls only (50% female)",
+    "Per 2×2 cell — Beta_3 (full sample)",
+    "Per 2×2 cell — girls only",
+    "Alpha (two-tailed)", "Target power",
+    "ICC — pregnancy", "ICC — overconfidence score",
+    "ICC — test scores", "ICC — depression/stress",
+    "ICC — knowledge/behaviour",
+    "Pregnancy base rate — 1 year", "Pregnancy base rate — 4 years",
+    "Overconfidence mean (pilot)", "Overconfidence SD (pilot)"
+  ),
+  Value = c(
+    n_schools_treatment, n_schools_per_arm,
+    n_students_per_school,
+    n_chatbot_total,
+    n_per_chatbot_arm, n_girls_per_arm,
+    n_per_cell_2x2,    n_girls_per_cell,
+    alpha, power_target,
+    icc_pregnancy, icc_overconfidence,
+    icc_test_scores, icc_depression, icc_knowledge,
+    p0_preg_1yr, p0_preg_4yr,
+    mean_overconf, sd_overconf
+  )
+) |>
+  kable(caption = "Table 1: Key design and outcome parameters", align = c("l","r")) |>
+  kable_styling(bootstrap_options = c("striped","hover","condensed"), full_width = FALSE) |>
+  pack_rows("Study design",            1,  8) |>
+  pack_rows("Statistical conventions", 9, 10) |>
+  pack_rows("ICC estimates",          11, 15) |>
+  pack_rows("Outcome baselines",      16, 19)
+```
+
+---
+
+# Analytical Framework: School Fixed Effects and Within-School Variance
+
+```{r within_school_variance}
+#  The residual variance driving precision is the *within-school* component:
+#   sigma^2_within = sigma^2_total × (1 – ICC)
+
+
+within_school_sd <- function(sigma_total, icc) sigma_total * sqrt(1 - icc)
+
+tibble(
+  Outcome     = c("Pregnancy — 1 year", "Pregnancy — 4 years",
+                  "Overconfidence score", "Test scores",
+                  "Depression / stress", "Knowledge / behaviour"),
+  sigma_total = c(sqrt(p0_preg_1yr * (1 - p0_preg_1yr)),
+                  sqrt(p0_preg_4yr * (1 - p0_preg_4yr)),
+                  sd_overconf, sd_test_scores, sd_depression, sd_knowledge),
+  icc         = c(icc_pregnancy, icc_pregnancy, icc_overconfidence,
+                  icc_test_scores, icc_depression, icc_knowledge)
+) |>
+  mutate(
+    sigma_within      = round(within_school_sd(sigma_total, icc), 4),
+    variance_kept_pct = round((1 - icc) * 100, 1),
+    variance_removed_pct = round(icc * 100, 1)
+  ) |>
+  rename(
+    `σ_total`             = sigma_total,
+    `ICC`             = icc,
+    `σ_within (with FE)`  = sigma_within,
+    `Variance kept (%)`   = variance_kept_pct,
+    `Variance removed (%)` = variance_removed_pct
+  ) |>
+  kable(digits = 4,
+        caption = "Table 2: Within-school variance after absorbing school fixed effects") |>
+  kable_styling(bootstrap_options = c("striped","hover","condensed"), full_width = FALSE)
+```
+
+# Analytical MDEs by Outcome
+
+```{r mde_function}
+# Returns MDEs and Cohen's d (SE effects) for Estimates 1 and 2.
+# For binary outcomes, pass sigma_total = sqrt(p0*(1-p0)).
+# For standardized outcomes, pass sigma_total = 1 (SD).
+
+compute_mde <- function(sigma_total, icc,
+                        n_arm, n_cell = n_arm / 2,
+                        alpha = 0.05, power = 0.80) {
+  z_a   <- qnorm(1 - alpha / 2)
+  z_b   <- qnorm(power)
+  sig_w <- within_school_sd(sigma_total, icc)
+
+  mde1 <- (z_a + z_b) * sig_w * sqrt(2 / n_arm)
+  mde2 <- (z_a + z_b) * sig_w * 2 / sqrt(n_cell)
+
+  list(
+    sigma_within = sig_w,
+    mde_e1       = mde1,           # MDE for Beta2
+    mde_e2       = mde2,           # MDE for Beta3
+    d_e1         = mde1 / sig_w,   # Cohen's d — Estimate 1 --> In Standard Deviations
+    d_e2         = mde2 / sig_w    # Cohen's d — Estimate 2 --> In Standard Deviations
+  )
+}
+```
+
+```{r compute_all_outcomes}
+# Apply to all outcomes 
+
+# Pregnancy (binary)
+pg1 <- compute_mde(sqrt(p0_preg_1yr * (1 - p0_preg_1yr)), icc_pregnancy,
+                   n_per_chatbot_arm, n_per_cell_2x2)
+pg4 <- compute_mde(sqrt(p0_preg_4yr * (1 - p0_preg_4yr)), icc_pregnancy,
+                   n_per_chatbot_arm, n_per_cell_2x2)
+
+# Overconfidence score (continuous, scale points)
+oc  <- compute_mde(sd_overconf,   icc_overconfidence,
+                   n_per_chatbot_arm, n_per_cell_2x2)
+
+# Test scores — full sample and girls only
+ts_full  <- compute_mde(sd_test_scores, icc_test_scores,
+                        n_per_chatbot_arm, n_per_cell_2x2)
+ts_girls <- compute_mde(sd_test_scores, icc_test_scores,
+                        n_girls_per_arm,  n_girls_per_cell)
+
+# Depression / stress — full sample and girls only
+dep_full  <- compute_mde(sd_depression, icc_depression,
+                         n_per_chatbot_arm, n_per_cell_2x2)
+dep_girls <- compute_mde(sd_depression, icc_depression,
+                         n_girls_per_arm,  n_girls_per_cell)
+
+# Knowledge / behaviour index — full sample and girls only
+kb_full  <- compute_mde(sd_knowledge, icc_knowledge,
+                        n_per_chatbot_arm, n_per_cell_2x2)
+kb_girls <- compute_mde(sd_knowledge, icc_knowledge,
+                        n_girls_per_arm,  n_girls_per_cell)
+```
+
+---
+
+# Summary Table: MDEs for Estimands 1 and 2 {.tabset}
+
+The table below is the primary output of this document. Each row is an outcome; the two columns report the MDE for the **main chatbot effect** ($\beta_2$) and for the **chatbot × debiasing interaction** ($\beta_3$).
+
+```{r summary_mde_table}
+# Claude helped me with this table format for a tidy export
+outcomes_list <- list(pg1, pg4, oc,
+                      ts_full, ts_girls,
+                      dep_full, dep_girls,
+                      kb_full,  kb_girls)
+
+outcome_names <- c(
+  "Pregnancy rate — 1 year",
+  "Pregnancy rate — 4 years",
+  "Overconfidence score",
+  "Test scores",
+  "Test scores — girls only",
+  "Depression / stress",
+  "Depression / stress — girls only",
+  "Knowledge / behaviour index",
+  "Knowledge / behaviour — girls only"
+)
+
+# Natural unit labels for each outcome
+units <- c("pp", "pp", "pts", "SD", "SD", "SD", "SD", "pp", "pp")
+
+# ICC used for each outcome (for display)
+icc_used <- c(icc_pregnancy, icc_pregnancy, icc_overconfidence,
+              icc_test_scores, icc_test_scores,
+              icc_depression,  icc_depression,
+              icc_knowledge,   icc_knowledge)
+
+# N per arm used for Estimand 1 (halved for girls-only rows)
+n_arm_used <- c(n_per_chatbot_arm, n_per_chatbot_arm, n_per_chatbot_arm,
+                n_per_chatbot_arm, n_girls_per_arm,
+                n_per_chatbot_arm, n_girls_per_arm,
+                n_per_chatbot_arm, n_girls_per_arm)
+
+# Helper: format MDE with units and Cohen's d
+fmt_mde <- function(r, units_label) {
+  sprintf("%.4f %s\n(d = %.4f)", r$mde_e1, units_label, r$d_e1)
+}
+fmt_mde2 <- function(r, units_label) {
+  sprintf("%.4f %s\n(d = %.4f)", r$mde_e2, units_label, r$d_e2)
+}
+
+mde_tbl <- tibble(
+  Outcome                          = outcome_names,
+  `ICC (ρ)`                        = icc_used,
+  `N per arm (β₂)`                 = scales::comma(n_arm_used),
+  `σ_within`                       = round(sapply(outcomes_list, `[[`, "sigma_within"), 4),
+  `MDE — β₂ (Chatbot only)`        = mapply(fmt_mde,  outcomes_list, units),
+  `MDE — β₃ (Chatbot × Debiasing)` = mapply(fmt_mde2, outcomes_list, units)
+)
+
+mde_tbl |>
+  kable(
+    caption = paste0(
+      "Table 3: Minimum Detectable Effects — Estimates 1 and 2 ",
+      "(80% power, α = 0.05, two-tailed)"
+    ),
+    align = c("l","c","r","r","l","l")
+  ) |>
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = TRUE) |>
+  pack_rows("Binary outcomes",       1, 2) |>
+  pack_rows("Continuous outcomes",   3, 9) |>
+  column_spec(5, width = "18em") |>
+  column_spec(6, width = "18em") |>
+  footnote(
+    general = paste0(
+      "MDE(β₂) = (z_β + z_{α/2}) × σ_within × √(2/N_arm). ",
+      "MDE(β₃) = (z_β + z_{α/2}) × σ_within × 2/√(n_cell). ",
+      "σ_within = σ_total × √(1 – ICC). ",
+      "MDE(β₃)/MDE(β₂) = 2 by construction for balanced 2×2. ",
+      "Girls-only rows assume 50% female (N halved). ",
+      "pp = percentage points; pts = scale points; SD = standard deviation units."
+    ),
+    general_title = "Notes: "
+  )
+```
+
+
+
+# Open Design Variation: Saturation Design (25%, 50%, 75%)
+
+```{r saturation_analytical}
+# Analytical information loss comparison 
+
+# Uniform 50/50: all 450 schools at s = 0.50
+info_uniform <- n_schools_treatment * n_students_per_school * 0.50 * 0.50
+
+# Three-level saturation: equal thirds (150 schools each) at 25%, 50%, 75%
+sat_levels        <- c(0.25, 0.50, 0.75)
+schools_per_level <- n_schools_treatment / length(sat_levels)   # 150 schools each
+
+info_saturation <- sum(
+  schools_per_level * n_students_per_school * sat_levels * (1 - sat_levels)
+)
+
+info_ratio   <- info_saturation / info_uniform   # relative efficiency (< 1)
+se_inflation <- 1 / sqrt(info_ratio)             # SE multiplier (> 1); same for all outcomes
+
+info_loss_pct <- (1 - info_ratio) * 100          # % information lost
+
+# Under saturation, MDE scales up by se_inflation for every outcome
+
+# Per-outcome MDE table
+
+sat_tbl <- tibble(
+  Outcome = outcome_names,
+
+  # Columns 1–2: design-level quantities — identical for every outcome
+  `Info loss`    = sprintf("−%.1f%%", info_loss_pct),
+  `SE inflation` = sprintf("×%.4f",   se_inflation),
+
+  # Columns 3–4: MDE for β₂ (main chatbot effect) under each design
+  `MDE β₂ — uniform`    = mapply(function(r, u)
+    sprintf("%.4f %s", r$mde_e1, u),
+    outcomes_list, units),
+
+  `MDE β₂ — saturation` = mapply(function(r, u)
+    sprintf("%.4f %s\n(+%.1f%%)", r$mde_e1 * se_inflation, u,
+            (se_inflation - 1) * 100),
+    outcomes_list, units),
+
+  # Columns 5–6: MDE for β₃ (chatbot × debiasing interaction) under each design
+  `MDE β₃ — uniform`    = mapply(function(r, u)
+    sprintf("%.4f %s", r$mde_e2, u),
+    outcomes_list, units),
+
+  `MDE β₃ — saturation` = mapply(function(r, u)
+    sprintf("%.4f %s\n(+%.1f%%)", r$mde_e2 * se_inflation, u,
+            (se_inflation - 1) * 100),
+    outcomes_list, units)
+)
+
+sat_tbl |>
+  kable(
+    caption = paste0(
+      "Table 5: MDE Comparison — Uniform 50/50 vs. Saturation 25%/50%/75% Design ",
+      "(80% power, α = 0.05, two-tailed)"
+    ),
+    align = c("l", "c", "c", "r", "r", "r", "r")
+  ) |>
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = TRUE) |>
+  add_header_above(c(
+    " "          = 1,
+    "Design cost (constant across outcomes)" = 2,
+    "Estimate 1: Main chatbot effect (β₂)"  = 2,
+    "Estimate 2: Chatbot × Debiasing (β₃)"  = 2
+  )) |>
+  pack_rows("Binary outcomes",     1, 2) |>
+  pack_rows("Continuous outcomes", 3, 9) |>
+  footnote(
+    general = paste0(
+      "Information loss and SE inflation are design-level quantities — ",
+      "identical for all outcomes since the saturation assignment is independent of the outcome. ",
+      "MDE(saturation) = MDE(uniform) × SE inflation. ",
+      "MDE(β₃) = 2 × MDE(β₂) by construction for a balanced 2×2 design. ",
+      "% increase in parentheses = (se_inflation − 1) × 100 = +",
+      round((se_inflation - 1) * 100, 1), "% for all cells. ",
+      "pp = percentage points; pts = scale points; SD = standard deviation units."
+    ),
+    general_title = "Notes: "
+  )
+```
+
+# Power Simulations
+
+```{r powersimu_function}
+# R translation of the Stata powersimu program 
+
+powersimu <- function(n_clusters, cluster_size, b_spill, rho) {
+
+  # 1. Create clusters: cluster-level error drives ICC
+  u_cluster <- rnorm(n_clusters, mean = 0, sd = sqrt(rho))
+
+  # 2. Assign saturation levels randomly from {0, 0.25, 0.50, 0.75}
+  saturation <- sample(c(0, 0.25, 0.50, 0.75), n_clusters, replace = TRUE)
+
+  # 3. Expand to individuals
+  id_j  <- rep(seq_len(n_clusters), each = cluster_size)
+  u_j   <- rep(u_cluster,           each = cluster_size)
+  sat_j <- rep(saturation,          each = cluster_size)
+
+  # 4. Individual-level error: e_ij ~ N(0, sqrt(1 - rho))
+  e_ij <- rnorm(n_clusters * cluster_size, mean = 0, sd = sqrt(1 - rho))
+
+  # 5. Assign individual treatment based on cluster saturation
+  treated <- rbinom(n_clusters * cluster_size, size = 1, prob = sat_j)
+
+  # 6. Generate outcome
+  y <- 0.5 * treated + b_spill * sat_j + u_j + e_ij
+  df <- data.frame(id_j = factor(id_j), treated, sat_j, y)
+
+  # 7. Cluster-robust regression
+  fit      <- lm(y ~ treated + sat_j, data = df)
+  vcov_cl  <- sandwich::vcovCL(fit, cluster = ~ id_j)
+  coef_tbl <- lmtest::coeftest(fit, vcov = vcov_cl)
+
+  # P-value for saturation coefficient
+  p_val <- coef_tbl["sat_j", "Pr(>|t|)"]
+
+  # Rejection indicator
+  as.integer(p_val < 0.05)
+}
+```
+
+
+```{r study_sim_grid, cache=TRUE}
+# Study-specific simulation: 450 schools × 90 students 
+
+set.seed(28052026)
+n_reps_study <- 1000  
+
+b_spill_grid <- c(0.10, 0.20, 0.30, 0.40, 0.50)
+
+# Named vector: rho value (one per study outcome group)
+rho_scenarios <- c(
+  "Pregnancy (ρ = 0.05)"       = icc_pregnancy,
+  "Overconfidence (ρ = 0.065)" = icc_overconfidence,
+  "Depression (ρ = 0.10)"      = icc_depression,
+  "Test scores (ρ = 0.20)"     = icc_test_scores
+)
+
+# Run grid: for each ICC scenario × each b_spill value, run n_reps_study simulations
+sim_grid <- map_dfr(names(rho_scenarios), function(scenario) {
+  rho_val <- rho_scenarios[[scenario]]
+
+  power_vec <- map_dbl(b_spill_grid, function(bs) {
+    res <- lapply(1:n_reps_study, function(x)
+      powersimu(
+        n_clusters   = n_schools_treatment,    # 450
+        cluster_size = n_students_per_school,  # 90
+        b_spill      = bs,
+        rho          = rho_val
+      )
+    )
+    mean(unlist(res))
+  })
+
+  tibble(Scenario = scenario, b_spill = b_spill_grid, power = power_vec)
+})
+```
+
+## Sim Results
+
+```{r sim_results_table}
+# Add 80% power reference row via row_spec highlighting.
+
+sim_wide <- sim_grid |>
+  mutate(power_fmt = sprintf("%.1f%%", power * 100)) |>
+  select(b_spill, Scenario, power_fmt) |>
+  pivot_wider(names_from = Scenario, values_from = power_fmt) |>
+  rename(`b_spill (SD)` = b_spill)
+
+sim_wide |>
+  kable(
+    caption = paste0(
+      "Table 6: Simulated Power to Detect the Spillover Effect — ",
+      "Saturation Design (25% / 50% / 75%), ",
+      n_reps_study, " replications per cell"
+    ),
+    align = "c"
+  ) |>
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE) |>
+  add_header_above(c(" " = 1, "Simulated power by ICC scenario" = 4)) |>
+  footnote(
+    general = paste0(
+      "Power = fraction of ", n_reps_study, " simulations rejecting H₀: b_spill = 0 ",
+      "at α = 0.05 (two-tailed, cluster-robust SEs via sandwich::vcovCL). ",
+      "N = ", scales::comma(n_schools_treatment * n_students_per_school), " students ",
+      "across ", n_schools_treatment, " schools. ",
+      "Saturation levels drawn uniformly from {0, 0.25, 0.50, 0.75} per school. ",
+      "Direct treatment effect fixed at 0.5 SD. ",
+      "b_spill is in normalised units where σ_total = 1."
+    ),
+    general_title = "Notes: "
+  )
+```
